@@ -213,6 +213,7 @@ fn extract_vertices(
 
 // This is by far the most expensive part, mostly due to Trimesh being kinda slow and the algorithm itself
 // being pretty naive. For now we just throw threads at it, but it can definitely be improved.
+#[allow(dead_code)]
 fn voxelize_chunk(
     isometry: &Isometry<f64>,
     mesh: &TriMesh,
@@ -308,11 +309,116 @@ fn voxelize_chunk(
     Some(VoxelCellData::new(grid, mapping))
 }
 
+// Multi-mesh variant: builds a single grid that overlays contributions from each mesh
+// and maps each mesh to a distinct material index and id.
+fn voxelize_chunk_multi(
+    isometry: &Isometry<f64>,
+    meshes: &[(Arc<TriMesh>, u8, u64)],
+    aabb: &Aabb,
+    voxel_origin: &Point<i32>,
+    is_lod: bool,
+) -> Option<VoxelCellData> {
+    // Use the same over-voxelization strategy as single-mesh.
+    let voxel_size = aabb.extents().x / 32.0;
+    let voxel_size_offset = Vector::repeat(voxel_size);
+    let origin = aabb.mins - voxel_size_offset * 2.0;
+
+    let range = RangeZYX::with_extent(*voxel_origin - Vector::repeat(1), 35);
+
+    // Note that this large aabb could result in a lot of wasted computation, so we clip the range.
+    let svo_aabb = Aabb::new(origin, origin + voxel_size_offset * 64.0);
+
+    let inner_range = RangeZYX::with_extent(*voxel_origin, 32);
+    let mut grid = VertexGrid::new(range, inner_range);
+
+    // Track if anything was written to materials across all meshes
+    let mut any_materials = false;
+
+    for (mesh, mat_index, _mat_id) in meshes.iter() {
+        let voxels = voxelize(
+            isometry,
+            mesh.as_ref(),
+            &svo_aabb,
+            *voxel_origin - Vector::repeat(2),
+            64,
+            &RangeZYX::with_extent(*voxel_origin - Vector::repeat(1), 35),
+        );
+
+        voxels.cata(|subrange, value, cs| {
+            if cs.is_some() {
+                return;
+            }
+            let (place_materials, place_positions) = match value {
+                Voxel::External => (false, false),
+                Voxel::Internal => (true, true),
+                Voxel::Boundry(significant) => (*significant, true),
+            };
+            if place_materials {
+                any_materials = true;
+                // Materials are placed on the +[1, 1, 1] vertex.
+                let material_range = RangeZYX {
+                    origin: subrange.origin + Vector::repeat(1),
+                    size: subrange.size,
+                };
+                grid.set_materials(&material_range, VertexMaterial::new(*mat_index));
+            }
+            if place_positions {
+                // Set the default positions for all voxels in this subrange.
+                let voxel_range = RangeZYX {
+                    origin: subrange.origin,
+                    size: subrange.size + Vector::repeat(1),
+                };
+                grid.set_voxels(&voxel_range, VertexVoxel::new([126, 126, 126]));
+            }
+        });
+
+        // Extract and set significant vertex offsets for this mesh.
+        let vertices = extract_vertices(
+            &voxels,
+            isometry,
+            mesh.as_ref(),
+            &svo_aabb,
+            *voxel_origin - Vector::repeat(2),
+        );
+        for (point, offset) in vertices {
+            grid.set_voxel(&point, VertexVoxel::new([offset.x, offset.y, offset.z]));
+        }
+    }
+
+    if !is_lod && (!any_materials || grid.is_empty()) {
+        return None;
+    }
+
+    // Build a combined material mapping: debug + each mesh material
+    let mut mapping = MaterialMapper::default();
+    mapping.insert(
+        1,
+        MaterialId {
+            id: 157903047,
+            short_name: "Debug1\0\0".into(),
+        },
+    );
+    for (_, idx, mat_id) in meshes.iter() {
+        mapping.insert(
+            *idx,
+            MaterialId {
+                id: *mat_id,
+                short_name: "Material".into(),
+            },
+        );
+    }
+
+    Some(VoxelCellData::new(grid, mapping))
+}
+
+
+#[allow(dead_code)]
 pub struct Voxelizer {
     isometry: Arc<Isometry<f64>>,
     mesh: Arc<TriMesh>,
 }
 
+#[allow(dead_code)]
 impl Voxelizer {
     pub fn new(isometry: Isometry<f64>, mesh: TriMesh) -> Voxelizer {
         Voxelizer {
@@ -365,4 +471,60 @@ impl Voxelizer {
 
         chunk_futures.into_map(|f| f.map(|f| block_on(f)).flatten())
     }
+}
+
+// Create LODs for multiple meshes and materials into a single SVO with a combined mapping.
+pub fn create_lods_multi(
+    isometry: &Isometry<f64>,
+    meshes: &[TriMesh],
+    aabb: &Aabb,
+    origin: Point<i32>,
+    height: usize,
+    materials: &[u64],
+) -> Svo<Option<VoxelCellData>> {
+    let extent = 1 << height;
+    let chunk_size = aabb.extents().x / extent as f64;
+
+    // Pre-wrap meshes and assign stable material indices starting at 2
+    let wrapped: Vec<(Arc<TriMesh>, u8, u64)> = meshes
+        .iter()
+        .enumerate()
+        .map(|(i, m)| (Arc::new(m.clone()), (2 + i) as u8, materials[i]))
+        .collect();
+
+    let isometry = Arc::new(*isometry);
+    let chunk_futures = Svo::from_fn(origin, extent, &|range| {
+        let mins = aabb.mins + (range.origin - origin).map(|v| v as f64) * chunk_size;
+        let maxs = mins + range.size.map(|v| v as f64) * chunk_size;
+        let aabb = Aabb::new(mins.into(), maxs.into());
+
+        // If no mesh intersects this chunk, skip entirely.
+        let cuboid = Cuboid::new(aabb.half_extents() * 1.05);
+        let cuboid_pos = Isometry::from(aabb.center());
+        let mut intersects_any = false;
+        for (mesh, _, _) in wrapped.iter() {
+            if intersection_test(&isometry, mesh.as_ref(), &cuboid_pos, &cuboid).unwrap() {
+                intersects_any = true;
+                break;
+            }
+        }
+        if !intersects_any {
+            return SvoReturn::Leaf(None);
+        }
+
+        let is_lod = range.size.x > 1;
+        let voxel_origin = range.origin * 32 / range.size.x;
+        let isometry = isometry.clone();
+        let chunk_meshes = wrapped.clone();
+        let task = task::spawn(async move {
+            voxelize_chunk_multi(&isometry, &chunk_meshes, &aabb, &voxel_origin, is_lod)
+        });
+        if range.size.x == 1 {
+            SvoReturn::Leaf(Some(task))
+        } else {
+            SvoReturn::Internal(Some(task))
+        }
+    });
+
+    chunk_futures.into_map(|f| f.map(|f| block_on(f)).flatten())
 }
