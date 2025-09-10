@@ -51,7 +51,7 @@ struct StraightnessArgs {
     search_span: f64,
 
     /// Prefer edges before vertices when snapping
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
     edge_first: bool,
 
     /// Minimum segment length for neighbor snapping (2 = adjacent pairs)
