@@ -211,11 +211,6 @@ impl Blueprint {
         }
     }
 
-    pub fn to_construct_json(&self) -> serde_json::Value {
-        self.to_construct_json_result()
-            .unwrap_or_else(|_| serde_json::json!({"error": "Construct is empty in core region."}))
-    }
-
     pub fn to_construct_json_result(&self) -> Result<serde_json::Value, String> {
         let (voxel_data, bb) = make_voxel_data(&self.voxel_data, self.fill_material);
         if bb.is_none() {

@@ -14,9 +14,8 @@ use rangemap::RangeMap;
 use serde::ser::SerializeStruct;
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum SerializeError {
-    Internal(Error),
+    Internal(#[allow(unused)] Error),
     BadData,
 }
 
@@ -27,12 +26,11 @@ impl From<Error> for SerializeError {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub enum DeserializeError {
-    Internal(Error),
+    Internal(#[allow(unused)] Error),
     BadData,
-    BadMagic(u32, u32),
-    BadVersion(u32, u32),
+    BadMagic(#[allow(unused)] u32, #[allow(unused)] u32),
+    BadVersion(#[allow(unused)] u32, #[allow(unused)] u32),
 }
 
 fn assert_magic(actual: u32, expected: u32) -> Result<(), DeserializeError> {

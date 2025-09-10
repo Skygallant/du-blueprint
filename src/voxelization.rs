@@ -115,18 +115,21 @@ fn lowest_error_point_on_surface(
             continue;
         }
         let dir = (end - start).normalize();
-        let start = end - params.search_span * dir;
-        let end = end + params.search_span * dir;
+        let start_probe = *end - params.search_span * dir;
+        let end_probe = *end + params.search_span * dir;
         for (x, y, z) in WalkVoxels::<f64, i64>::new(
-            (start.x, start.y, start.z),
-            (end.x, end.y, end.z),
+            (start_probe.x, start_probe.y, start_probe.z),
+            (end_probe.x, end_probe.y, end_probe.z),
             &VoxelOrigin::Corner,
         ) {
             let point = Point::new(x as f64, y as f64, z as f64);
             let geom_error = shape.distance_to_local_point(&point, false);
             let v = point - *end;
-            let l1 = v.coords.abs().sum();
-            let l_inf = v.coords.abs().max();
+            let ax = v.x.abs();
+            let ay = v.y.abs();
+            let az = v.z.abs();
+            let l1 = ax + ay + az;
+            let l_inf = ax.max(ay).max(az);
             let straight_penalty = (l1 - l_inf) * params.straightness_bias;
             let total = geom_error + straight_penalty;
             if total < lowest_error {
@@ -166,7 +169,7 @@ fn calculate_vertex_offset(
 
     let try_edge_first = params.edge_first;
 
-    let mut choose_vertex = || -> Option<Vector<u8>> {
+    let choose_vertex = || -> Option<Vector<u8>> {
         let closest_vertex = triangle
             .vertices()
             .iter()
@@ -180,7 +183,7 @@ fn calculate_vertex_offset(
         }
     };
 
-    let mut choose_edge = || -> Option<Vector<u8>> {
+    let choose_edge = || -> Option<Vector<u8>> {
         let (segment, closest_edge) = triangle
             .edges()
             .map(|s| (s, s.project_local_point(&discrete_anchor, false).point))
@@ -298,103 +301,6 @@ fn extract_vertices(
 // This is by far the most expensive part, mostly due to Trimesh being kinda slow and the algorithm itself
 // being pretty naive. For now we just throw threads at it, but it can definitely be improved.
 #[allow(dead_code)]
-fn voxelize_chunk(
-    isometry: &Isometry<f64>,
-    mesh: &TriMesh,
-    aabb: &Aabb,
-    voxel_origin: &Point<i32>,
-    material: u64,
-    is_lod: bool,
-    params: &VoxelizationParams,
-) -> Option<VoxelCellData> {
-    // We have to over-voxelize that chunk due to the boundries expected in voxel cell data.
-    // e.g. for an inner_range of [0, 0, 0] -> [32, 32, 32] the actual range of the chunk is
-    //  [-1, -1, -1] -> [34, 34, 34], likely to remove seams when generating the mesh.
-    let voxel_size = aabb.extents().x / 32.0;
-    let voxel_size_offset = Vector::repeat(voxel_size);
-    let origin = aabb.mins - voxel_size_offset * 2.0;
-
-    let range = RangeZYX::with_extent(voxel_origin - Vector::repeat(1), 35);
-
-    // Note that this large aabb could result in a lot of wasted computation, so we clip the range.
-    let svo_aabb = Aabb::new(origin, origin + voxel_size_offset * 64.0);
-    let voxels = voxelize(
-        isometry,
-        mesh,
-        &svo_aabb,
-        voxel_origin - Vector::repeat(2),
-        64,
-        &range,
-        params,
-    );
-
-    let inner_range = RangeZYX::with_extent(*voxel_origin, 32);
-    let mut grid = VertexGrid::new(range, inner_range);
-    voxels.cata(|subrange, value, cs| {
-        if cs.is_some() {
-            return;
-        }
-        let (place_materials, place_positions) = match value {
-            Voxel::External => (false, false),
-            Voxel::Internal => (true, true),
-            Voxel::Boundary(significant) => (*significant, true),
-        };
-        if place_materials {
-            // Materials are placed on the +[1, 1, 1] vertex.
-            let material_range = RangeZYX {
-                origin: subrange.origin + Vector::repeat(1),
-                size: subrange.size,
-            };
-            grid.set_materials(&material_range, VertexMaterial::new(2));
-        }
-        if place_positions {
-            // Set the default positions for all voxels. We will update the significant ones later.
-            let voxel_range = RangeZYX {
-                origin: subrange.origin,
-                size: subrange.size + Vector::repeat(1),
-            };
-            grid.set_voxels(&voxel_range, VertexVoxel::new([126, 126, 126]));
-        }
-    });
-
-    if !is_lod && grid.is_empty() {
-        return None;
-    }
-
-    // Extract the non-default vertices and set them now.
-    let vertices = extract_vertices(
-        &voxels,
-        isometry,
-        mesh,
-        &svo_aabb,
-        voxel_origin - Vector::repeat(2),
-        params,
-    );
-    for (point, offset) in vertices {
-        grid.set_voxel(&point, VertexVoxel::new([offset.x, offset.y, offset.z]));
-    }
-
-    let mut mapping = MaterialMapper::default();
-
-    // Every blueprint I checked had this debug material in the first index.
-    // I assume there is a reason for it, so we'll add it as well.
-    mapping.insert(
-        1,
-        MaterialId {
-            id: 157903047,
-            short_name: "Debug1\0\0".into(),
-        },
-    );
-    mapping.insert(
-        2,
-        MaterialId {
-            id: material,
-            short_name: "Material".into(),
-        },
-    );
-
-    Some(VoxelCellData::new(grid, mapping))
-}
 
 // Multi-mesh variant: builds a single grid that overlays contributions from each mesh
 // and maps each mesh to a distinct material index and id.
@@ -502,69 +408,7 @@ fn voxelize_chunk_multi(
 }
 
 
-#[allow(dead_code)]
-pub struct Voxelizer {
-    isometry: Arc<Isometry<f64>>,
-    mesh: Arc<TriMesh>,
-}
-
-#[allow(dead_code)]
-impl Voxelizer {
-    pub fn new(isometry: Isometry<f64>, mesh: TriMesh) -> Voxelizer {
-        Voxelizer {
-            isometry: Arc::new(isometry),
-            mesh: Arc::new(mesh),
-        }
-    }
-
-    pub fn create_lods(
-        &self,
-        aabb: &Aabb,
-        origin: Point<i32>,
-        height: usize,
-        material: u64,
-    ) -> Svo<Option<VoxelCellData>> {
-        let extent = 1 << height;
-        let chunk_size = aabb.extents().x / extent as f64;
-        let params = Arc::new(VoxelizationParams::default());
-        let chunk_futures = Svo::from_fn(origin, extent, &|range| {
-            let mins = aabb.mins + (range.origin - origin).map(|v| v as f64) * chunk_size;
-            let maxs = mins + range.size.map(|v| v as f64) * chunk_size;
-            let aabb = Aabb::new(mins.into(), maxs.into());
-
-            let cuboid = Cuboid::new(aabb.half_extents() * 1.05);
-            let cuboid_pos = Isometry::from(aabb.center());
-            if intersection_test(&self.isometry, self.mesh.as_ref(), &cuboid_pos, &cuboid).unwrap()
-            {
-                let is_lod = range.size.x > 1;
-                let voxel_origin = range.origin * 32 / range.size.x;
-                let isometry = self.isometry.clone();
-                let mesh = self.mesh.clone();
-                let params = params.clone();
-                let task = task::spawn(async move {
-                    voxelize_chunk(
-                        &isometry,
-                        &mesh,
-                        &aabb,
-                        &voxel_origin,
-                        material,
-                        is_lod,
-                        params.as_ref(),
-                    )
-                });
-                if range.size.x == 1 {
-                    SvoReturn::Leaf(Some(task))
-                } else {
-                    SvoReturn::Internal(Some(task))
-                }
-            } else {
-                SvoReturn::Leaf(None)
-            }
-        });
-
-        chunk_futures.into_map(|f| f.map(|f| block_on(f)).flatten())
-    }
-}
+// (Single-mesh Voxelizer removed as dead code)
 
 // Create LODs for multiple meshes and materials into a single SVO with a combined mapping.
 pub fn create_lods_multi(

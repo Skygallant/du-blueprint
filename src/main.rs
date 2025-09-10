@@ -112,6 +112,7 @@ fn main() {
             r#type,
             material,
             scale,
+            straight,
         } => {
             let (models, _) = tobj::load_obj(
                 &input,
