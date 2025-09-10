@@ -23,12 +23,12 @@ at the problem.
 
 ## Materials
 
-Use `--material` to assign DU honeycomb material IDs to meshes in the input `.obj`.
+Use `--material=<id>` to assign DU honeycomb material IDs to meshes in the input `.obj`.
 
 - Input type: numeric DU honeycomb IDs (e.g., `1971262921`).
-- Repeat or comma-separate the flag to pass multiple IDs:
-  - Repeated flags: `--material 111 --material 222 --material 333`
-  - Comma list: `--material 111,222,333`
+- Repeat or comma-separate the flag to pass multiple IDs (use `=`):
+  - Repeated flags: `--material=111 --material=222 --material=333`
+  - Comma list: `--material=111,222,333`
 - Assignment rule: materials apply sequentially to the meshes as they appear in the OBJ
   (i.e., first ID -> first mesh, second ID -> second mesh, etc.).
 - Fewer IDs than meshes: the last provided ID is reused for all remaining meshes.
@@ -42,37 +42,37 @@ Notes
 Examples
 ```
 # Single material for all meshes
-du-blueprint generate ... --material 1971262921 model.obj out.blueprint
+du-blueprint generate ... --material=1971262921 model.obj out.blueprint
 
 # Per-mesh materials in order (first->third meshes)
-du-blueprint generate ... --material 111,222,333 model.obj out.blueprint
+du-blueprint generate ... --material=111,222,333 model.obj out.blueprint
 
 # Equivalent using repeated flags
-du-blueprint generate ... --material 111 --material 222 --material 333 model.obj out.blueprint
+du-blueprint generate ... --material=111 --material=222 --material=333 model.obj out.blueprint
 
 # If the OBJ has 5 meshes and you pass only 2 materials, mesh 3–5 use 222
-du-blueprint generate ... --material 111,222 model.obj out.blueprint
+du-blueprint generate ... --material=111,222 model.obj out.blueprint
 ```
 
 ## Straight-Line Controls
 
 To favor straighter, more continuous voxel lines, the `generate` command supports several flags. These tune how boundary vertices are chosen and how neighboring offsets are snapped.
 
-- `--straightness-bias <float>`
+- `--straightness-bias=<float>`
   - Adds a small penalty to off-axis candidates so axis-aligned runs are preferred.
   - Default: `0.0` (off). Try `0.5–2.0` for noticeable effect.
-- `--edge-first`
+- `--edge-first=<bool>`
   - Prefer snapping to triangle edges before vertices. Often yields longer straight runs on panels.
-- `--snap-threshold <float>`
+- `--snap-threshold=<float>`
   - Discrete-space distance threshold for accepting vertex/edge snaps.
   - Default: `84.0`. Increase slightly (e.g., `90`) to be more permissive.
-- `--search-span <float>`
+- `--search-span=<float>`
   - Length of the probe along the surface direction when seeking a good offset (in voxel units).
   - Default: `5.0`.
-- `--min-segment-len <int>`
+- `--min-segment-len=<int>`
   - Minimum segment length considered during neighbor snapping; `2` enables adjacent-pair smoothing.
   - Default: `2`.
-- `--snap-gap <u8>`
+- `--snap-gap=<u8>`
   - Maximum per-axis difference for two neighboring offsets to be merged by snapping.
   - Default: `2`.
 
@@ -97,7 +97,7 @@ Generate with subtle straightening:
 ```
 du-blueprint generate \
   --auto --type=dynamic --size=l \
-  --straightness-bias 0.5 --snap-gap 1 \
+  --straightness-bias=0.5 --snap-gap=1 \
   my_model.obj my_blueprint.blueprint
 ```
 
@@ -105,7 +105,7 @@ Generate with strong straightening for panel-like models:
 ```
 du-blueprint generate \
   --auto --type=dynamic --size=l \
-  --edge-first --straightness-bias 2.0 --snap-threshold 90 --snap-gap 3 --min-segment-len 3 \
+  --edge-first=true --straightness-bias=2.0 --snap-threshold=90 --snap-gap=3 --min-segment-len=3 \
   my_model.obj my_blueprint.blueprint
 ```
 
