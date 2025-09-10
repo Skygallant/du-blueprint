@@ -81,7 +81,9 @@ pub trait Serialize {
         let mut uncompressed_data = Vec::new();
         self.serialize(&mut uncompressed_data)?;
         (uncompressed_data.len() as u64).serialize(&mut result)?;
-        let mut compressed_data = vec![0; uncompressed_data.len() * 2];
+        // Use LZ4's exact upper bound to size the destination buffer
+        let max_dst = unsafe { lz4::liblz4::LZ4_compressBound(uncompressed_data.len() as i32) } as usize;
+        let mut compressed_data = vec![0; max_dst];
         unsafe {
             let len = lz4::liblz4::LZ4_compress_default(
                 uncompressed_data.as_ptr() as *const c_char,
@@ -666,6 +668,7 @@ impl VertexGrid {
             .for_each_index_range(subrange, |r| self.sparse_vertices.insert(r, voxel))
     }
 
+    #[allow(dead_code)]
     pub fn calculate_metadata(&self, material_id: u64) -> HeavyMetadata {
         let mut min_pos = Point::new(i32::MAX, i32::MAX, i32::MAX);
         let mut max_pos = Point::new(i32::MIN, i32::MIN, i32::MIN);
@@ -870,9 +873,62 @@ impl VoxelCellData {
         }
     }
 
-    pub fn calculate_metadata(&self, hash: i64, material: u64) -> AggregateMetadata {
+    pub fn calculate_metadata(&self, hash: i64, _material: u64) -> AggregateMetadata {
+        // Recompute heavy metadata using actual per-voxel materials from the grid
+        // and the material id mapping, instead of a single provided material.
+
+        // Compute bounding box over inner_range where materials are set, and gather counts per label.
+        let mut min_pos = Point::new(i32::MAX, i32::MAX, i32::MAX);
+        let mut max_pos = Point::new(i32::MIN, i32::MIN, i32::MIN);
+        let mut total_materials: usize = 0;
+        let mut per_label_counts: BTreeMap<u8, usize> = BTreeMap::new();
+
+        self.grid
+            .range
+            .for_each_index_range(&self.grid.inner_range, |r| {
+                for (subrange, mat) in self.grid.sparse_materials.overlapping(&r) {
+                    let isect = range_intersection(subrange, &r);
+                    // Update bounding box conservatively by visiting each index in the intersection.
+                    // This mirrors the previous single-material logic for correctness.
+                    for i in isect.clone() {
+                        let pos = self.grid.range.position_from_index(i);
+                        min_pos = min_pos.inf(&pos);
+                        max_pos = max_pos.sup(&pos);
+                    }
+                    let count = isect.clone().count();
+                    if count > 0 {
+                        total_materials += count;
+                        *per_label_counts.entry(mat.material).or_insert(0) += count;
+                    }
+                }
+            });
+
+        let heavy_current = if total_materials == 0 {
+            HeavyMetadata::default()
+        } else {
+            let bounding_box = RangeZYX {
+                origin: min_pos,
+                size: max_pos - min_pos,
+            };
+
+            // Convert label counts to MaterialId counts using the reverse mapping.
+            let mut material_stats: BTreeMap<MaterialId, FixedPoint> = BTreeMap::new();
+            for (label, count) in per_label_counts.into_iter() {
+                if let Some(mat) = self.mapping.reverse_mapping.get(&label) {
+                    material_stats.insert(mat.clone(), FixedPoint::from_f64(count as f64 / 64.0));
+                }
+            }
+
+            HeavyMetadata {
+                bounding_box: Some(bounding_box),
+                material_stats: if material_stats.is_empty() { None } else { Some(material_stats) },
+                inertia: None,
+                server_timestamp: 0,
+                server_previous_version: 0,
+            }
+        };
+
         let mut light_current = LightMetadata::default();
-        let heavy_current = self.grid.calculate_metadata(material);
         light_current.vox = Some(heavy_current.material_stats.is_some());
         light_current.r#mod = Some(true);
         light_current.hash_voxel = Some(hash);

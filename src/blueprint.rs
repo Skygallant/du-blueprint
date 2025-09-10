@@ -212,15 +212,20 @@ impl Blueprint {
     }
 
     pub fn to_construct_json(&self) -> serde_json::Value {
+        self.to_construct_json_result()
+            .unwrap_or_else(|_| serde_json::json!({"error": "Construct is empty in core region."}))
+    }
+
+    pub fn to_construct_json_result(&self) -> Result<serde_json::Value, String> {
         let (voxel_data, bb) = make_voxel_data(&self.voxel_data, self.fill_material);
         if bb.is_none() {
-            panic!("Construct is empty in core region.");
+            return Err("Construct is empty in core region.".into());
         }
         let bb = bb.unwrap();
         let mins = bb.origin.map(|v| v as f64) / 4.0;
         let maxs = mins + bb.size.map(|v| v as f64) / 4.0;
         let center = Vector::repeat(self.info.size as f32 / 2.0 + 0.125);
-        json!({
+        Ok(json!({
             "Model": {
                 "Id": 1,
                 "Name": self.name,
@@ -277,6 +282,6 @@ impl Blueprint {
               }
             ],
             "Links": [  ]
-        })
+        }))
     }
 }
