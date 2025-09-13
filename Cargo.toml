@@ -18,6 +18,10 @@ clap = { version = "4.5.16", features = ["derive"] }
 line_drawing = "1.0.0"
 async-std = "1.12.0"
 serde = { version = "1.0.215", features=["serde_derive"] }
+image = { version = "0.24", default-features = false, features = ["png", "jpeg"] }
+csscolorparser = "0.6"
+palette = { version = "0.7", features = ["std"] }
+deltae = "0.3"
 
 [profile.release]
 debug = true
