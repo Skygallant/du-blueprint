@@ -4,3 +4,8 @@
 *.blueprint
 *.mtl
 *.stl
+*.txt
+*.zip
+*.tmp
+*.lnk
+*.json
